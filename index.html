@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>FunControlGameByHamza – Stay on the Setpoint</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f5f5f5;
+    }
+    #container {
+      display: flex;
+      height: 100vh;
+    }
+    #controls {
+      width: 260px;
+      background: #ffffff;
+      border-right: 1px solid #ddd;
+      padding: 14px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    #controls h1 {
+      font-size: 18px;
+      margin: 0;
+    }
+    #controls h2 {
+      font-size: 14px;
+      margin: 0;
+      color: #555;
+    }
+    #instructions {
+      font-size: 13px;
+      background: #f0f4ff;
+      padding: 6px 8px;
+      border-radius: 6px;
+    }
+    button {
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid #888;
+      background: #fafafa;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover {
+      background: #e8f0ff;
+    }
+    #btnRow {
+      display: flex;
+      gap: 6px;
+    }
+    #statusBox {
+      font-size: 12px;
+      background: #f9f9ff;
+      padding: 6px 8px;
+      border-radius: 6px;
+      min-height: 50px;
+    }
+    #visuals {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      box-sizing: border-box;
+      gap: 8px;
+    }
+    canvas {
+      background: #ffffff;
+      border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+    }
+    #gameCanvas {
+      flex: 2;
+    }
+    #graphCanvas {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+<div id="container">
+  <div id="controls">
+    <h1>FunControlGameByHamza</h1>
+    <h2>Stay on the Setpoint</h2>
+
+    <div id="instructions">
+      Robot wants to stay on the center line (setpoint).<br>
+      Obstacles appear on the line and move toward you.<br><br>
+      Use <b>Up</b>/<b>Down</b> or ↑ / ↓ to dodge obstacles.<br>
+      When you leave the line, the tracking error grows and the
+      graph below shows it.
+    </div>
+
+    <div id="btnRow">
+      <button id="btnUp">Move Up</button>
+      <button id="btnDown">Move Down</button>
+    </div>
+
+    <button id="btnReset">Reset game</button>
+
+    <div id="statusBox">
+      Time: <span id="timeVal">0.00</span> s<br>
+      Normalized error: <span id="errVal">0.00</span><br>
+      Hits: <span id="hitVal">0</span>
+    </div>
+
+    <div style="font-size:12px;color:#555;">
+      Teaching idea: setpoint = center line.<br>
+      Error = distance from line.<br>
+      Students see that disturbances/obstacles force them to move,
+      and the error graph spikes whenever tracking is poor.
+    </div>
+  </div>
+
+  <div id="visuals">
+    <canvas id="gameCanvas"></canvas>
+    <canvas id="graphCanvas"></canvas>
+  </div>
+</div>
+
+<script>
+  // ===== Canvas setup =====
+  const gameCanvas = document.getElementById("gameCanvas");
+  const graphCanvas = document.getElementById("graphCanvas");
+  const gameCtx = gameCanvas.getContext("2d");
+  const graphCtx = graphCanvas.getContext("2d");
+
+  function resizeCanvases() {
+    const visuals = document.getElementById("visuals");
+    gameCanvas.width = visuals.clientWidth - 16;
+    gameCanvas.height = Math.floor((visuals.clientHeight - 16) * 2 / 3);
+    graphCanvas.width = visuals.clientWidth - 16;
+    graphCanvas.height = Math.floor((visuals.clientHeight - 16) * 1 / 3);
+  }
+  window.addEventListener("resize", resizeCanvases);
+  resizeCanvases();
+
+  // ===== UI elements =====
+  const btnUp = document.getElementById("btnUp");
+  const btnDown = document.getElementById("btnDown");
+  const btnReset = document.getElementById("btnReset");
+  const timeVal = document.getElementById("timeVal");
+  const errVal = document.getElementById("errVal");
+  const hitVal = document.getElementById("hitVal");
+
+  // ===== Game state =====
+  let centerY = gameCanvas.height * 0.55;
+  let robotX = 120;
+  let robotY = centerY;
+  let robotRadius = 14;
+  let maxOffsetPix = gameCanvas.height * 0.25;
+
+  let obstacles = [];
+  let obstacleTimer = 0;
+  let nextSpawn = 2.0;
+  const obstacleSpeed = 180; // pixels per second
+
+  let simTime = 0;
+  let hits = 0;
+
+  // Graph data
+  let errorTimes = [];
+  let errorValues = [];
+  let graphAccumulator = 0;
+  const graphDt = 0.05; // sample error every 50 ms
+
+  let lastTimestamp = null;
+  let running = true;
+
+  // ===== Helper functions =====
+  function resetGame() {
+    centerY = gameCanvas.height * 0.55;
+    robotX = 120;
+    robotY = centerY;
+    maxOffsetPix = gameCanvas.height * 0.25;
+
+    obstacles = [];
+    obstacleTimer = 0;
+    nextSpawn = 1.5 + Math.random() * 2.0;
+
+    simTime = 0;
+    hits = 0;
+    errorTimes = [];
+    errorValues = [];
+    graphAccumulator = 0;
+    lastTimestamp = null;
+    running = true;
+    updateStatus(0, 0);
+  }
+
+  function updateStatus(errNorm) {
+    timeVal.textContent = simTime.toFixed(2);
+    errVal.textContent = errNorm.toFixed(2);
+    hitVal.textContent = hits.toString();
+  }
+
+  function spawnObstacle() {
+    const w = 26;
+    const h = 36;
+    const x = gameCanvas.width + w;
+    const y = centerY; // on the line
+    obstacles.push({x, y, w, h});
+  }
+
+  function moveRobot(delta) {
+    robotY += delta;
+    const minY = centerY - maxOffsetPix;
+    const maxY = centerY + maxOffsetPix;
+    if (robotY < minY) robotY = minY;
+    if (robotY > maxY) robotY = maxY;
+  }
+
+  // Button controls
+  btnUp.addEventListener("click", () => moveRobot(-20));
+  btnDown.addEventListener("click", () => moveRobot(20));
+  btnReset.addEventListener("click", resetGame);
+
+  // Keyboard controls
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp" || e.key === "w" || e.key === "W") {
+      moveRobot(-20);
+    } else if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") {
+      moveRobot(20);
+    } else if (e.key === "r" || e.key === "R") {
+      resetGame();
+    }
+  });
+
+  // ===== Main loop =====
+  function loop(timestamp) {
+    if (!lastTimestamp) lastTimestamp = timestamp;
+    const dt = (timestamp - lastTimestamp) / 1000;
+    lastTimestamp = timestamp;
+
+    if (running) {
+      update(dt);
+    }
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ===== Update (physics + spawn + error logging) =====
+  function update(dt) {
+    simTime += dt;
+
+    // Spawn obstacles
+    obstacleTimer += dt;
+    if (obstacleTimer >= nextSpawn) {
+      spawnObstacle();
+      obstacleTimer = 0;
+      nextSpawn = 1.5 + Math.random() * 2.0; // random gap
+    }
+
+    // Move obstacles
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      obstacles[i].x -= obstacleSpeed * dt;
+      if (obstacles[i].x + obstacles[i].w < 0) {
+        obstacles.splice(i, 1);
+      }
+    }
+
+    // Collision detection
+    for (const ob of obstacles) {
+      const dx = (ob.x - ob.w/2) - robotX;
+      const dy = ob.y - robotY;
+      const horizDist = Math.abs(dx);
+      const vertDist = Math.abs(dy);
+      if (horizDist < (robotRadius + ob.w/2) && vertDist < (robotRadius + ob.h/2)) {
+        // collision
+        hits++;
+        // simple penalty: stop obstacles briefly
+        obstacles.length = 0;
+        obstacleTimer = 0;
+        nextSpawn = 2.0;
+        break;
+      }
+    }
+
+    // Error (normalized distance from line)
+    const errorPix = Math.abs(robotY - centerY);
+    const errNorm = Math.min(1.5, errorPix / maxOffsetPix); // clamp
+    updateStatus(errNorm);
+
+    // Log error for graph at fixed interval
+    graphAccumulator += dt;
+    while (graphAccumulator >= graphDt) {
+      graphAccumulator -= graphDt;
+      errorTimes.push(simTime);
+      errorValues.push(errNorm);
+      // keep last 20 s
+      while (errorTimes.length > 0 && simTime - errorTimes[0] > 20) {
+        errorTimes.shift();
+        errorValues.shift();
+      }
+    }
+  }
+
+  // ===== Draw game =====
+  function drawGame() {
+    const W = gameCanvas.width;
+    const H = gameCanvas.height;
+    gameCtx.clearRect(0, 0, W, H);
+
+    // background
+    gameCtx.fillStyle = "#f5f5f5";
+    gameCtx.fillRect(0, 0, W, H);
+
+    // center line (setpoint)
+    gameCtx.strokeStyle = "#555";
+    gameCtx.lineWidth = 2;
+    gameCtx.beginPath();
+    gameCtx.moveTo(W * 0.05, centerY);
+    gameCtx.lineTo(W * 0.95, centerY);
+    gameCtx.stroke();
+
+    gameCtx.fillStyle = "#555";
+    gameCtx.font = "13px sans-serif";
+    gameCtx.fillText("Setpoint (center line)", 12, centerY - 8);
+
+    // allowed band (optional)
+    gameCtx.fillStyle = "rgba(76,175,80,0.05)";
+    gameCtx.fillRect(
+      W * 0.05,
+      centerY - maxOffsetPix * 0.2,
+      W * 0.9,
+      maxOffsetPix * 0.4
+    );
+
+    // obstacles
+    for (const ob of obstacles) {
+      gameCtx.fillStyle = "#ef5350";
+      gameCtx.fillRect(ob.x - ob.w/2, ob.y - ob.h/2, ob.w, ob.h);
+      gameCtx.strokeStyle = "#b71c1c";
+      gameCtx.lineWidth = 2;
+      gameCtx.strokeRect(ob.x - ob.w/2, ob.y - ob.h/2, ob.w, ob.h);
+    }
+
+    // robot
+    gameCtx.fillStyle = "#4caf50";
+    gameCtx.beginPath();
+    gameCtx.arc(robotX, robotY, robotRadius, 0, 2 * Math.PI);
+    gameCtx.fill();
+    gameCtx.strokeStyle = "#1b5e20";
+    gameCtx.lineWidth = 2;
+    gameCtx.stroke();
+
+    // text
+    gameCtx.fillStyle = "#000";
+    gameCtx.font = "12px sans-serif";
+    gameCtx.fillText("Use Up/Down or ↑/↓ to stay on the line but dodge red obstacles.", 12, 20);
+  }
+
+  // ===== Draw graph =====
+  function drawGraph() {
+    const W = graphCanvas.width;
+    const H = graphCanvas.height;
+    graphCtx.clearRect(0, 0, W, H);
+
+    graphCtx.fillStyle = "#ffffff";
+    graphCtx.fillRect(0, 0, W, H);
+
+    const left = 40, right = W - 15, top = 10, bottom = H - 25;
+
+    // axes
+    graphCtx.strokeStyle = "#444";
+    graphCtx.lineWidth = 1;
+    graphCtx.beginPath();
+    graphCtx.moveTo(left, top);
+    graphCtx.lineTo(left, bottom);
+    graphCtx.lineTo(right, bottom);
+    graphCtx.stroke();
+
+    graphCtx.fillStyle = "#000";
+    graphCtx.font = "12px sans-serif";
+    graphCtx.fillText("Time (s)", right - 55, H - 6);
+    graphCtx.save();
+    graphCtx.translate(12, (top + bottom) / 2);
+    graphCtx.rotate(-Math.PI / 2);
+    graphCtx.fillText("Normalized error", -50, 0);
+    graphCtx.restore();
+
+    if (errorTimes.length < 2) return;
+
+    const tMax = errorTimes[errorTimes.length - 1];
+    const tMin = Math.max(0, tMax - 20); // last 20 s
+    const yMin = 0;
+    const yMax = 1.5;
+
+    // grid lines y
+    graphCtx.strokeStyle = "#ddd";
+    graphCtx.setLineDash([3, 3]);
+    for (let v = 0; v <= 1.5; v += 0.5) {
+      const y = bottom - (v - yMin)/(yMax - yMin)*(bottom - top);
+      graphCtx.beginPath();
+      graphCtx.moveTo(left, y);
+      graphCtx.lineTo(right, y);
+      graphCtx.stroke();
+      graphCtx.fillStyle = "#444";
+      graphCtx.setLineDash([]);
+      graphCtx.fillText(v.toFixed(1), 10, y + 4);
+      graphCtx.setLineDash([3, 3]);
+    }
+    graphCtx.setLineDash([]);
+
+    // error curve
+    graphCtx.strokeStyle = "#2a7ae2";
+    graphCtx.lineWidth = 2;
+    graphCtx.beginPath();
+    for (let i = 0; i < errorTimes.length; i++) {
+      const ti = errorTimes[i];
+      const ei = errorValues[i];
+      const x = left + (ti - tMin)/(tMax - tMin)*(right - left);
+      const y = bottom - (ei - yMin)/(yMax - yMin)*(bottom - top);
+      if (i === 0) graphCtx.moveTo(x, y);
+      else graphCtx.lineTo(x, y);
+    }
+    graphCtx.stroke();
+
+    // small legend
+    graphCtx.fillStyle = "rgba(255,255,255,0.8)";
+    graphCtx.fillRect(right - 150, top + 6, 140, 36);
+    graphCtx.fillStyle = "#000";
+    graphCtx.font = "11px sans-serif";
+    graphCtx.fillText("Error = distance from line", right - 146, top + 20);
+    graphCtx.fillText("Try to keep it small!", right - 146, top + 34);
+  }
+
+  function draw() {
+    drawGame();
+    drawGraph();
+  }
+
+  // start with a clean state
+  resetGame();
+</script>
+</body>
+</html>
